@@ -831,6 +831,16 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
                         ~RegistrationForm.is_deleted)
                 .first())
 
+    def _get_registrant_affiliation_details(self, registration):
+        user = registration.user
+        if not user or not getattr(user, 'affiliation_link', None):
+            return '', ''
+
+        affiliation = user.affiliation_link
+        org = (affiliation.meta or {}).get('acronym', '')
+        country_code = affiliation.country_code or ''
+        return org, country_code
+
     @memoize_request
     def get_personalized_join_url(self, vc_room, event_vc_room, user=None, *, registration=None):
         if vc_room.type != self.service_name or not self.settings.get('allow_auto_register'):
@@ -919,13 +929,19 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
                     room_ops[zoom_id] = {'add': {}, 'remove': {}, 'vc_room': vc_room}
 
                 if should_add:
+                    org, country = self._get_registrant_affiliation_details(registration)
+                    reg_data = {
+                        'email': email,
+                        'first_name': registration.first_name,
+                        'last_name': registration.last_name,
+                    }
+                    if org:
+                        reg_data['org'] = org
+                    if country:
+                        reg_data['country'] = country
                     room_ops[zoom_id]['add'][email] = {
                         'indico_id': registration.id,
-                        'data': {
-                            'email': email,
-                            'first_name': registration.first_name,
-                            'last_name': registration.last_name,
-                        },
+                        'data': reg_data,
                     }
                 else:
                     room_ops[zoom_id]['remove'][email] = registration.id

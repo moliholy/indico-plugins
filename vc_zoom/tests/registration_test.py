@@ -18,6 +18,7 @@ from indico.modules.events.registration.models.forms import RegistrationForm
 from indico.modules.events.registration.models.items import RegistrationFormItemType, RegistrationFormSection
 from indico.modules.events.registration.models.registrations import RegistrationState
 from indico.modules.events.registration.util import create_personal_data_fields, create_registration
+from indico.modules.users.models.affiliations import Affiliation
 from indico.modules.vc.models.vc_rooms import VCRoom, VCRoomEventAssociation, VCRoomStatus
 
 
@@ -403,6 +404,65 @@ def test_vc_room_created_syncs_existing_registrations(db, zoom_plugin, zoom_api_
     reg_data = zoom_api_registrants['add_meeting_registrant'].call_args[0][1]
     assert reg_data['email'] == 'test@example.com'
     assert reg_data['first_name'] == 'John'
+
+
+@pytest.mark.parametrize(
+    (
+        'affiliation_meta',
+        'country_code',
+        'expected_org',
+        'expected_country',
+        'expect_org_field',
+        'expect_country_field',
+    ),
+    (
+        ({'state': 'Geneva', 'acronym': 'CERN'}, 'CH', 'CERN', 'CH', True, True),
+        ({'state': 'Geneva'}, 'CH', 'European Organization for Nuclear Research', 'CH', True, True),
+        ({}, '', 'European Organization for Nuclear Research', '', True, False),
+    ),
+)
+@pytest.mark.usefixtures('smtp')
+def test_vc_room_created_sets_zoom_registrant_org_and_country_from_user_affiliation(
+    db,
+    zoom_plugin,
+    zoom_api_registrants,
+    reg_form,
+    zoom_user,
+    create_user,
+    affiliation_meta,
+    country_code,
+    expected_org,
+    expected_country,
+    expect_org_field,
+    expect_country_field,
+):
+    event = reg_form.event
+    participant = create_user(2, first_name='John', last_name='Doe', email='test@example.com')
+    participant.affiliation_link = Affiliation(name='European Organization for Nuclear Research', meta=affiliation_meta,
+                                              country_code=country_code)
+    participant.affiliation = 'Profile affiliation text that must not be sent to Zoom'
+    registration = _make_complete_registration(db, zoom_plugin, reg_form, participant.email, 'John', 'Doe')
+    registration.user = participant
+    db.session.flush()
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    zoom_api_registrants['add_meeting_registrant'].reset_mock()
+
+    vc_room, assoc = _create_vc_room_with_assoc(db, event, zoom_user)
+    signals.vc.vc_room_created.send(vc_room, event=event, assoc=assoc)
+    zoom_plugin._flush_pending_registrations(None)
+
+    reg_data = zoom_api_registrants['add_meeting_registrant'].call_args[0][1]
+    assert reg_data['first_name'] == 'John'
+    assert reg_data['last_name'] == 'Doe'
+    if expect_org_field:
+        assert reg_data['org'] == expected_org
+    else:
+        assert 'org' not in reg_data
+    if expect_country_field:
+        assert reg_data['country'] == expected_country
+    else:
+        assert 'country' not in reg_data
 
 
 @pytest.mark.usefixtures('smtp')
