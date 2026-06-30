@@ -368,29 +368,54 @@ def test_vc_room_created_skips_non_complete_registrations(db, zoom_plugin, zoom_
 
 
 @pytest.mark.usefixtures('request_context', 'db', 'smtp')
-def test_enable_auto_register_skips_existing_zoom_registrants(
+def test_backfill_registrants_skips_existing_zoom_registrants(
     zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
     create_vc_room_with_assoc, make_complete_registration,
 ):
-    """Enabling auto_register on an existing room should skip registrants already in Zoom."""
+    """The backfill should add only registrants that are not already in Zoom."""
     event = reg_form.event
     make_complete_registration(reg_form, 'existing@example.com', 'Already', 'Registered')
     make_complete_registration(reg_form, 'new@example.com', 'Brand', 'New')
 
     zoom_plugin.settings.set('allow_auto_register', True)
-    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=False)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
 
     zoom_api_registrants['list_meeting_registrants'].return_value = {
         'registrants': [{'id': 'reg_existing', 'email': 'existing@example.com'}]
     }
     zoom_api_registrants['add_meeting_registrant'].reset_mock()
 
-    zoom_plugin.update_data_vc_room(vc_room, {'auto_register': True}, is_new=False)
-    zoom_plugin._flush_pending_registrations(None)
+    zoom_plugin.backfill_registrants(vc_room)
 
     assert zoom_api_registrants['add_meeting_registrant'].call_count == 1
     reg_data = zoom_api_registrants['add_meeting_registrant'].call_args[0][1]
     assert reg_data['email'] == 'new@example.com'
+
+
+@pytest.mark.usefixtures('request_context', 'db', 'smtp')
+def test_enable_auto_register_defers_backfill_to_task(
+    mocker, zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    """Enabling auto_register must not sync existing registrants in-request; it enqueues a task on commit."""
+    event = reg_form.event
+    make_complete_registration(reg_form, 'new@example.com', 'Brand', 'New')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=False)
+    delay = mocker.patch('indico_vc_zoom.plugin.backfill_event_registrants.delay')
+    zoom_api_registrants['add_meeting_registrant'].reset_mock()
+
+    zoom_plugin.update_data_vc_room(vc_room, {'auto_register': True}, is_new=False)
+
+    # nothing is pushed to Zoom synchronously and the task is not enqueued before the commit
+    zoom_plugin._flush_pending_registrations(None)
+    zoom_api_registrants['add_meeting_registrant'].assert_not_called()
+    delay.assert_not_called()
+
+    # the backfill is enqueued once the surrounding transaction commits
+    zoom_plugin._enqueue_pending_backfills(None)
+    delay.assert_called_once_with(vc_room)
 
 
 @pytest.mark.parametrize(

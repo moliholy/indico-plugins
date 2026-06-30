@@ -41,7 +41,7 @@ from indico_vc_zoom.blueprint import blueprint
 from indico_vc_zoom.cli import cli
 from indico_vc_zoom.forms import VCRoomAttachForm, VCRoomForm
 from indico_vc_zoom.notifications import notify_host_start_url
-from indico_vc_zoom.task import refresh_meetings
+from indico_vc_zoom.task import backfill_event_registrants, refresh_meetings
 from indico_vc_zoom.util import (UserLookupMode, ZoomMeetingType, fetch_zoom_meeting, find_enterprise_email,
                                  gen_random_passcode, get_alt_host_emails, get_schedule_args, get_url_data_args,
                                  process_alternative_hosts, update_zoom_meeting)
@@ -269,6 +269,7 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         self.connect(signals.event.registration_form_deleted, self._registration_form_deleted)
         self.connect(signals.vc.vc_room_created, self._vc_room_created)
         self.connect(signals.core.after_process, self._flush_pending_registrations)
+        self.connect(signals.core.after_commit, self._enqueue_pending_backfills)
         self.template_hook('event-vc-room-list-item-labels', self._render_vc_room_labels)
         self.template_hook('before-render-registration-info', self._render_registration_zoom_link)
         for wp in (WPSimpleEventDisplay, WPVCEventPage, WPVCManageEvent, WPConferenceDisplay):
@@ -448,34 +449,14 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
 
         # Push approval_type whenever auto_register is toggled. Manual approval (1) keeps the public
         # registration page gated (self-registrants stay "pending"); Indico-pushed registrants are
-        # auto-approved via auto_approve. On enable we also sync any existing registrants so the
-        # initial backfill can hit the registrants endpoint.
+        # auto-approved via auto_approve. On enable we also queue a background backfill of the
+        # existing registrants, which the approval_type push lets hit the registrants endpoint.
         if not is_new and auto_register_before != vc_room.data.get('auto_register'):
             is_webinar = vc_room.data.get('meeting_type') == 'webinar'
             desired_approval_type = 1 if vc_room.data.get('auto_register') else 2
             self._push_approval_type(vc_room, desired_approval_type, is_webinar=is_webinar)
             if vc_room.data.get('auto_register'):
-                candidates = [
-                    registration
-                    for event_assoc in vc_room.events
-                    for regform in event_assoc.event.registration_forms
-                    for registration in regform.active_registrations
-                    if registration.state == RegistrationState.complete
-                ]
-                if candidates:
-                    candidate_emails = {self._get_registrant_email(r) for r in candidates}
-                    try:
-                        already_registered = set(
-                            self._find_zoom_registrants(ZoomIndicoClient(), vc_room, candidate_emails)
-                        )
-                    except HTTPError:
-                        zoom_type = 'webinar' if is_webinar else 'meeting'
-                        self.logger.warning(f'Could not fetch registrants for Zoom {zoom_type} %s; '  # noqa: G004
-                                            'syncing all existing registrants', vc_room.data['zoom_id'])
-                        already_registered = set()
-                    for registration in candidates:
-                        if self._get_registrant_email(registration).lower() not in already_registered:
-                            self._queue_registration_sync(registration, remove=False)
+                self._schedule_registrant_backfill(vc_room)
 
     def create_room(self, vc_room, event):
         """Create a new Zoom meeting for an event, given a VC room.
@@ -980,6 +961,51 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
             is_webinar = ops['vc_room'].data.get('meeting_type') == 'webinar'
             self._add_registrants(client, zoom_id, ops['add'], is_webinar)
             self._remove_registrants(client, zoom_id, ops['vc_room'], ops['remove'], is_webinar)
+
+    def _schedule_registrant_backfill(self, vc_room):
+        if not self.settings.get('allow_auto_register'):
+            return
+        g.setdefault('zoom_pending_backfills', {})[vc_room.id] = vc_room
+
+    def _enqueue_pending_backfills(self, sender, **kwargs):
+        for vc_room in g.pop('zoom_pending_backfills', {}).values():
+            backfill_event_registrants.delay(vc_room)
+
+    def backfill_registrants(self, vc_room):
+        """Sync every existing complete registration into an auto_register Zoom room.
+
+        Deferred to a Celery task: a large event can hold thousands of registrants, well
+        beyond what one request can push to Zoom before timing out. Participants already in
+        Zoom are skipped, so the task is safe to retry or re-run.
+        """
+        if not self.settings.get('allow_auto_register') or not vc_room.data.get('auto_register'):
+            return
+        candidates = [
+            registration
+            for event_assoc in vc_room.events
+            for regform in event_assoc.event.registration_forms
+            for registration in regform.active_registrations
+            if registration.state == RegistrationState.complete
+        ]
+        if not candidates:
+            return
+        client = ZoomIndicoClient()
+        candidate_emails = {self._get_registrant_email(r) for r in candidates}
+        try:
+            already_registered = set(self._find_zoom_registrants(client, vc_room, candidate_emails))
+        except HTTPError:
+            zoom_type = 'webinar' if vc_room.data.get('meeting_type') == 'webinar' else 'meeting'
+            self.logger.warning(f'Could not fetch registrants for Zoom {zoom_type} %s; '  # noqa: G004
+                                'syncing all existing registrants', vc_room.data['zoom_id'])
+            already_registered = set()
+        pending = {
+            registration.id: (registration, False)
+            for registration in candidates
+            if self._get_registrant_email(registration).lower() not in already_registered
+        }
+        for zoom_id, ops in self._collect_room_ops(pending).items():
+            is_webinar = ops['vc_room'].data.get('meeting_type') == 'webinar'
+            self._add_registrants(client, zoom_id, ops['add'], is_webinar)
 
     def _collect_room_ops(self, pending):
         pending_remove_ids = {reg.id for reg, remove in pending.values() if remove}

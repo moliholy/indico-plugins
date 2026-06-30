@@ -13,6 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from indico.core.celery import celery
 from indico.core.db import db
+from indico.modules.vc.models.vc_rooms import VCRoomStatus
 
 from indico_vc_zoom.api.client import get_zoom_token
 
@@ -43,6 +44,13 @@ def refresh_meetings(vc_rooms, obj, log_entry=None):
         if log_entry:
             update_state_log(log_entry, failed)
             db.session.commit()
+
+
+@celery.task(plugin='vc_zoom', autoretry_for=(HTTPError,))
+def backfill_event_registrants(vc_room):
+    from indico_vc_zoom.plugin import ZoomPlugin
+    if vc_room.status != VCRoomStatus.deleted:
+        ZoomPlugin.instance.backfill_registrants(vc_room)
 
 
 @celery.periodic_task(run_every=crontab(minute='*/5'), plugin='vc_zoom')
