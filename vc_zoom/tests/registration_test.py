@@ -9,6 +9,7 @@ from datetime import timedelta
 
 import pytest
 from flask import session
+from flask_pluginengine import plugin_context
 
 from indico.core import signals
 from indico.modules.events.features.util import set_feature_enabled
@@ -17,7 +18,10 @@ from indico.modules.events.registration.models.forms import RegistrationForm
 from indico.modules.events.registration.models.items import RegistrationFormItemType, RegistrationFormSection
 from indico.modules.events.registration.models.registrations import RegistrationState
 from indico.modules.events.registration.util import create_personal_data_fields, create_registration
+from indico.modules.logs import EventLogRealm, LogKind
 from indico.modules.vc.models.vc_rooms import VCRoom, VCRoomEventAssociation, VCRoomStatus
+
+from indico_vc_zoom.task import deregister_event_registrants, sync_event_registrants
 
 
 def test_registration_sync_meeting(db, zoom_plugin, zoom_api_registrants, reg_form, create_zoom_meeting, test_client,
@@ -367,30 +371,200 @@ def test_vc_room_created_skips_non_complete_registrations(db, zoom_plugin, zoom_
     zoom_api_registrants['add_meeting_registrant'].assert_not_called()
 
 
-@pytest.mark.usefixtures('request_context', 'db', 'smtp')
-def test_enable_auto_register_skips_existing_zoom_registrants(
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_existing_registrants_skips_existing_zoom_registrants(
     zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
     create_vc_room_with_assoc, make_complete_registration,
 ):
-    """Enabling auto_register on an existing room should skip registrants already in Zoom."""
     event = reg_form.event
     make_complete_registration(reg_form, 'existing@example.com', 'Already', 'Registered')
     make_complete_registration(reg_form, 'new@example.com', 'Brand', 'New')
 
     zoom_plugin.settings.set('allow_auto_register', True)
-    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=False)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
 
     zoom_api_registrants['list_meeting_registrants'].return_value = {
         'registrants': [{'id': 'reg_existing', 'email': 'existing@example.com'}]
     }
     zoom_api_registrants['add_meeting_registrant'].reset_mock()
 
-    zoom_plugin.update_data_vc_room(vc_room, {'auto_register': True}, is_new=False)
-    zoom_plugin._flush_pending_registrations(None)
+    zoom_plugin.sync_existing_registrants(vc_room)
 
     assert zoom_api_registrants['add_meeting_registrant'].call_count == 1
     reg_data = zoom_api_registrants['add_meeting_registrant'].call_args[0][1]
     assert reg_data['email'] == 'new@example.com'
+
+
+@pytest.mark.usefixtures('request_context', 'db', 'smtp')
+def test_enable_auto_register_does_not_backfill(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'existing@example.com', 'Already', 'Registered')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=False)
+    zoom_api_registrants['add_meeting_registrant'].reset_mock()
+
+    zoom_plugin.update_data_vc_room(vc_room, {'auto_register': True}, is_new=False)
+    zoom_plugin._flush_pending_registrations(None)
+
+    zoom_api_registrants['add_meeting_registrant'].assert_not_called()
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_deregister_all_registrants_only_removes_indico_users(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+    make_complete_registration(reg_form, 'bob@example.com', 'Bob', 'Jones')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_meeting_registrants'].return_value = {
+        'registrants': [
+            {'id': 'reg_alice', 'email': 'alice@example.com'},
+            {'id': 'reg_bob', 'email': 'bob@example.com'},
+            {'id': 'reg_manual', 'email': 'manual@outside.com'},
+        ]
+    }
+    zoom_api_registrants['update_meeting_registrants_status'].reset_mock()
+
+    zoom_plugin.deregister_all_registrants(vc_room)
+
+    assert zoom_api_registrants['update_meeting_registrants_status'].call_count == 1
+    status_data = zoom_api_registrants['update_meeting_registrants_status'].call_args[0][1]
+    assert status_data['action'] == 'cancel'
+    cancelled = {r['email'] for r in status_data['registrants']}
+    assert cancelled == {'alice@example.com', 'bob@example.com'}
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_get_registration_sync_counts(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+    make_complete_registration(reg_form, 'bob@example.com', 'Bob', 'Jones')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+
+    # only Alice is registered in Zoom
+    zoom_api_registrants['list_meeting_registrants'].return_value = {
+        'registrants': [{'id': 'reg_alice', 'email': 'alice@example.com'}]
+    }
+    assert zoom_plugin.get_registration_sync_counts(vc_room) == {'registered': 1, 'total': 2}
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_logs_progress_and_total(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_meeting_registrants'].return_value = {'registrants': []}
+
+    zoom_plugin.sync_existing_registrants(vc_room)
+
+    summaries = [e.summary for e in event.log_entries]
+    assert 'Zoom registrant sync started' in summaries
+    assert 'Zoom registrant sync finished' in summaries
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_enables_registration_when_meeting_not_registered(
+    zoom_plugin, zoom_api, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_meeting_registrants'].return_value = {'registrants': []}
+    zoom_api['update_meeting'].reset_mock()
+
+    zoom_plugin.sync_existing_registrants(vc_room)
+
+    # the mocked meeting reports approval_type=2, so sync must push approval_type=1 first
+    assert any(call.args[1].get('settings', {}).get('approval_type') == 1
+               for call in zoom_api['update_meeting'].call_args_list)
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_task_runs_in_plugin_context_and_marks_log(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_meeting_registrants'].return_value = {'registrants': []}
+    log_entry = event.log(EventLogRealm.management, LogKind.change, 'Videoconference', 'sync',
+                          data={'State': 'pending'})
+
+    with plugin_context(zoom_plugin):
+        sync_event_registrants(vc_room, log_entry)
+
+    assert log_entry.data['State'] == 'succeeded'
+    assert zoom_api_registrants['add_meeting_registrant'].called
+
+
+def test_sync_endpoint_enqueues_task(
+    db, zoom_plugin, zoom_api_registrants, reg_form, create_zoom_meeting, test_client, zoom_user, mocker,
+):
+    zoom_plugin.settings.set('allow_auto_register', True)
+    event = reg_form.event
+    event.update_principal(zoom_user, full_access=True)
+    db.session.flush()
+
+    with test_client.session_transaction() as sess:
+        sess.set_session_user(zoom_user)
+    vc_room = create_zoom_meeting(event, 'event')
+    vc_room.data['auto_register'] = True
+    event_vc_room = vc_room.events[0]
+
+    delay = mocker.patch.object(sync_event_registrants, 'delay')
+    resp = test_client.post(
+        f'/event/{event.id}/manage/videoconference/zoom/{event_vc_room.id}/sync-registrants'
+    )
+
+    assert resp.status_code == 204
+    assert delay.call_count == 1
+
+
+def test_deregister_endpoint_enqueues_task(
+    db, zoom_plugin, zoom_api_registrants, reg_form, create_zoom_meeting, test_client, zoom_user, mocker,
+):
+    zoom_plugin.settings.set('allow_auto_register', True)
+    event = reg_form.event
+    event.update_principal(zoom_user, full_access=True)
+    db.session.flush()
+
+    with test_client.session_transaction() as sess:
+        sess.set_session_user(zoom_user)
+    vc_room = create_zoom_meeting(event, 'event')
+    vc_room.data['auto_register'] = False
+    event_vc_room = vc_room.events[0]
+
+    delay = mocker.patch.object(deregister_event_registrants, 'delay')
+    resp = test_client.post(
+        f'/event/{event.id}/manage/videoconference/zoom/{event_vc_room.id}/deregister-registrants'
+    )
+
+    assert resp.status_code == 204
+    assert delay.call_count == 1
 
 
 @pytest.mark.parametrize(
