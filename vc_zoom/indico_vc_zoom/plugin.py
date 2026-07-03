@@ -451,37 +451,12 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
 
         flag_modified(vc_room, 'data')
 
-        # Push approval_type whenever auto_register is toggled. Manual approval (1) keeps the public
-        # registration page gated (self-registrants stay "pending"); Indico-pushed registrants are
-        # auto-approved via auto_approve. On enable we also sync any existing registrants so the
-        # initial backfill can hit the registrants endpoint.
+        # Toggling only pushes approval_type; existing registrants are backfilled on demand via the
+        # async sync action so a large event can't time out this request. New ones sync via signals.
         if not is_new and auto_register_before != vc_room.data.get('auto_register'):
             is_webinar = vc_room.data.get('meeting_type') == 'webinar'
             desired_approval_type = 1 if vc_room.data.get('auto_register') else 2
             self._push_approval_type(vc_room, desired_approval_type, is_webinar=is_webinar)
-            if vc_room.data.get('auto_register'):
-                candidates = [
-                    registration
-                    for event_assoc in vc_room.events
-                    for regform in event_assoc.event.registration_forms
-                    for registration in regform.active_registrations
-                    if registration.state == RegistrationState.complete
-                ]
-                if candidates:
-                    self._preload_directory()
-                    candidate_emails = {self._get_registrant_email(r) for r in candidates}
-                    try:
-                        already_registered = set(
-                            self._find_zoom_registrants(ZoomIndicoClient(), vc_room, candidate_emails)
-                        )
-                    except HTTPError:
-                        zoom_type = 'webinar' if is_webinar else 'meeting'
-                        self.logger.warning(f'Could not fetch registrants for Zoom {zoom_type} %s; '  # noqa: G004
-                                            'syncing all existing registrants', vc_room.data['zoom_id'])
-                        already_registered = set()
-                    for registration in candidates:
-                        if self._get_registrant_email(registration).lower() not in already_registered:
-                            self._queue_registration_sync(registration, remove=False)
 
     def create_room(self, vc_room, event):
         """Create a new Zoom meeting for an event, given a VC room.
@@ -902,6 +877,157 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
             for registration in regform.active_registrations:
                 if registration.state == RegistrationState.complete:
                     self._queue_registration_sync(registration, remove=False)
+
+    def _collect_complete_registrations(self, vc_room):
+        return [
+            registration
+            for event_assoc in vc_room.events
+            for regform in event_assoc.event.registration_forms
+            for registration in regform.active_registrations
+            if registration.state == RegistrationState.complete
+        ]
+
+    def _candidate_registrant_emails(self, vc_room):
+        # completed-registrant emails minus host/alt-host (Zoom rejects registering hosts)
+        skip = self._get_zoom_host_emails(vc_room)
+        emails = {self._get_registrant_email(r).lower() for r in self._collect_complete_registrations(vc_room)}
+        return emails - skip
+
+    def _ensure_registration_enabled(self, vc_room, *, is_webinar):
+        # The meeting must require registration (approval_type 1) before registrants can be added;
+        # heal it here in case the toggle never pushed it through.
+        try:
+            meeting, __ = fetch_zoom_meeting(vc_room)
+        except VCRoomNotFoundError:
+            return
+        if meeting.get('settings', {}).get('approval_type') != 1:
+            self._push_approval_type(vc_room, 1, is_webinar=is_webinar)
+
+    def sync_existing_registrants(self, vc_room):
+        """Add every completed event registrant to the Zoom meeting, logging progress per batch."""
+        is_webinar = vc_room.data.get('meeting_type') == 'webinar'
+        self._ensure_registration_enabled(vc_room, is_webinar=is_webinar)
+        preload_zoom_account_directory()
+        client = ZoomIndicoClient()
+        zoom_id = vc_room.data['zoom_id']
+        event = self._room_event(vc_room)
+        entries = self._collect_registrants_to_add(client, vc_room)
+        total = len(entries)
+        self._log_sync_event(event, 'Zoom registrant sync started', {'Meeting': vc_room.name, 'To add': total})
+        added = 0
+        for i in range(0, total, BATCH_REGISTRANTS_MAX):
+            chunk = entries[i:i + BATCH_REGISTRANTS_MAX]
+            self._add_registrants(client, zoom_id, chunk, is_webinar)
+            added += len(chunk)
+            self._log_sync_event(event, 'Zoom registrant sync progress',
+                                 {'Meeting': vc_room.name, 'Batch': len(chunk), 'Progress': f'{added}/{total}'})
+        self._log_sync_event(event, 'Zoom registrant sync finished',
+                             {'Meeting': vc_room.name, 'Added': added,
+                              'Registered': self._format_counts(self.get_registration_sync_counts(vc_room))})
+        return added
+
+    def deregister_all_registrants(self, vc_room):
+        """Cancel every event registrant's Zoom registration, leaving manually-added ones untouched."""
+        is_webinar = vc_room.data.get('meeting_type') == 'webinar'
+        preload_zoom_account_directory()
+        client = ZoomIndicoClient()
+        zoom_id = vc_room.data['zoom_id']
+        event = self._room_event(vc_room)
+        email_ids = self._collect_registration_email_ids(vc_room)
+        registrant_map = self._find_zoom_registrant_ids(client, vc_room, set(email_ids)) if email_ids else {}
+        items = list(registrant_map.items())
+        total = len(items)
+        self._log_sync_event(event, 'Zoom registrant removal started', {'Meeting': vc_room.name, 'To remove': total})
+        removed = 0
+        for i in range(0, total, BATCH_REGISTRANTS_MAX):
+            chunk = items[i:i + BATCH_REGISTRANTS_MAX]
+            self._cancel_zoom_registrants(client, zoom_id, chunk, is_webinar)
+            removed += len(chunk)
+            self._log_sync_event(event, 'Zoom registrant removal progress',
+                                 {'Meeting': vc_room.name, 'Batch': len(chunk), 'Progress': f'{removed}/{total}'})
+        self._log_sync_event(event, 'Zoom registrant removal finished',
+                             {'Meeting': vc_room.name, 'Removed': removed,
+                              'Registered': self._format_counts(self.get_registration_sync_counts(vc_room))})
+        return removed
+
+    def _cancel_zoom_registrants(self, client, zoom_id, items, is_webinar):
+        status_data = {'action': 'cancel', 'registrants': [{'id': rid, 'email': email} for email, rid in items]}
+        try:
+            if is_webinar:
+                client.update_webinar_registrants_status(zoom_id, status_data)
+            else:
+                client.update_meeting_registrants_status(zoom_id, status_data)
+        except HTTPError:
+            zoom_type = 'webinar' if is_webinar else 'meeting'
+            self.logger.warning(f'Could not cancel registrants for Zoom {zoom_type} %s', zoom_id)  # noqa: G004
+
+    def _collect_registrants_to_add(self, client, vc_room):
+        try:
+            already = set(self._find_zoom_registrants(client, vc_room, self._candidate_registrant_emails(vc_room)))
+        except HTTPError:
+            already = set()
+        skip = self._get_zoom_host_emails(vc_room)
+        seen = set()
+        entries = []
+        for reg in self._collect_complete_registrations(vc_room):
+            email = self._get_registrant_email(reg)
+            key = email.lower()
+            if key in skip or key in already or key in seen:
+                continue
+            seen.add(key)
+            entries.append({'indico_id': reg.id,
+                            'data': {'email': email, 'first_name': reg.first_name, 'last_name': reg.last_name}})
+        return entries
+
+    def _collect_registration_email_ids(self, vc_room):
+        email_ids = {}
+        for event_assoc in vc_room.events:
+            for regform in event_assoc.event.registration_forms:
+                for registration in regform.active_registrations:
+                    email_ids[self._get_registrant_email(registration).lower()] = registration.id
+        return email_ids
+
+    def _room_event(self, vc_room):
+        assoc = next(iter(vc_room.events), None)
+        return assoc.event if assoc else None
+
+    def _log_sync_event(self, event, summary, data):
+        if event is None:
+            return
+        user = session.user if has_request_context() else None
+        event.log(EventLogRealm.management, LogKind.change, 'Videoconference', summary, user, data=data)
+
+    def _list_zoom_registrant_emails(self, vc_room):
+        client = ZoomIndicoClient()
+        zoom_id = vc_room.data['zoom_id']
+        is_webinar = vc_room.data.get('meeting_type') == 'webinar'
+        list_func = client.list_webinar_registrants if is_webinar else client.list_meeting_registrants
+        emails = set()
+        params = {'page_size': 300}
+        try:
+            while True:
+                resp = list_func(zoom_id, **params)
+                emails.update(r['email'].lower() for r in resp.get('registrants', []))
+                if not resp.get('next_page_token'):
+                    break
+                params['next_page_token'] = resp['next_page_token']
+        except (HTTPError, VCRoomNotFoundError):
+            return None
+        return emails
+
+    @staticmethod
+    def _format_counts(counts):
+        return f"?/{counts['total']}" if counts['registered'] is None else f"{counts['registered']}/{counts['total']}"
+
+    @memoize_request
+    def get_registration_sync_counts(self, vc_room):
+        """Live count of event registrants currently registered in the Zoom meeting."""
+        self._preload_directory()
+        emails = {self._get_registrant_email(reg).lower() for reg in self._collect_complete_registrations(vc_room)}
+        total = len(emails)
+        zoom_emails = self._list_zoom_registrant_emails(vc_room)
+        registered = None if zoom_emails is None else len(emails & zoom_emails)
+        return {'registered': registered, 'total': total}
 
     def _get_registrant_email(self, registration):
         if registration.user:

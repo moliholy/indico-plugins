@@ -1,6 +1,31 @@
 {% extends 'vc/management_buttons.html' %}
-{% from 'vc_zoom:buttons.html' import render_join_button, render_make_me_owner %}
+{% from 'vc_zoom:buttons.html' import render_join_button %}
 
 {% block buttons %}
     {{ render_join_button(vc_room, event_vc_room) }}
+    {% set event = event_vc_room.event %}
+    {% if plugin.settings.get('allow_auto_register') and vc_room.status.name != 'deleted'
+          and event.can_manage(session.user) %}
+        {% set counts = plugin.get_registration_sync_counts(vc_room) %}
+        {% set has_registered = counts.registered is not none and counts.registered > 0 %}
+        {% if vc_room.data.auto_register or has_registered %}
+            <span class="zoom-registrant-actions" style="margin-left: auto;">
+                {% if vc_room.data.auto_register %}
+                    <a class="i-button icon-user-check"
+                       title="{% trans %}Add all event registrants to this Zoom meeting{% endtrans %}"
+                       data-href="{{ url_for_plugin('vc_zoom.sync_registrants', event_vc_room) }}"
+                       data-method="POST"
+                       data-reload-after></a>
+                {% endif %}
+                {% if has_registered %}
+                    <a class="i-button danger icon-user-block"
+                       title="{% trans %}Remove all event registrants from this Zoom meeting{% endtrans %}"
+                       data-href="{{ url_for_plugin('vc_zoom.deregister_registrants', event_vc_room) }}"
+                       data-method="POST"
+                       data-reload-after
+                       data-confirm="{% trans %}Remove all event registrants from this Zoom meeting? Participants added manually in Zoom are not affected.{% endtrans %}"></a>
+                {% endif %}
+            </span>
+        {% endif %}
+    {% endif %}
 {% endblock %}

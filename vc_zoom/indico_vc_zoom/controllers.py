@@ -8,7 +8,7 @@
 import hashlib
 import hmac
 
-from flask import jsonify, request, session
+from flask import after_this_request, flash, jsonify, request, session
 from flask_pluginengine import current_plugin
 from marshmallow import EXCLUDE
 from sqlalchemy.orm.attributes import flag_modified
@@ -20,11 +20,14 @@ from werkzeug.exceptions import Forbidden, ServiceUnavailable
 from indico.core import signals
 from indico.core.db import db
 from indico.core.errors import UserValueError
+from indico.modules.logs import EventLogRealm, LogKind
 from indico.modules.vc.controllers import RHVCSystemEventBase
 from indico.modules.vc.exceptions import VCRoomError, VCRoomNotFoundError
 from indico.modules.vc.models.vc_rooms import VCRoom, VCRoomStatus
 from indico.util.i18n import _
 from indico.web.rh import RH
+
+from indico_vc_zoom.task import deregister_event_registrants, sync_event_registrants
 
 
 class RHRoomAlternativeHost(RHVCSystemEventBase):
@@ -45,6 +48,42 @@ class RHRoomAlternativeHost(RHVCSystemEventBase):
             db.session.rollback()
             raise
         return '', 204
+
+
+class RHZoomManageRegistrantsBase(RHVCSystemEventBase):
+    """Queue an asynchronous registrant operation for a Zoom meeting."""
+
+    task = None
+    log_summary = None
+    flash_message = None
+
+    def _process(self):
+        log_entry = self.event.log(EventLogRealm.management, LogKind.change, 'Videoconference',
+                                   self.log_summary, session.user,
+                                   data={'Meeting': self.vc_room.name, 'State': 'pending'})
+        task = self.task
+        vc_room = self.vc_room
+
+        @after_this_request
+        def _launch_task(response):
+            if log_entry in db.session:
+                task.delay(vc_room, log_entry)
+            return response
+
+        flash(self.flash_message, 'info')
+        return '', 204
+
+
+class RHZoomSyncRegistrants(RHZoomManageRegistrantsBase):
+    task = sync_event_registrants
+    log_summary = 'Zoom registrant sync requested'
+    flash_message = _('Registrant synchronization started. Progress will appear in the event log.')
+
+
+class RHZoomDeregisterRegistrants(RHZoomManageRegistrantsBase):
+    task = deregister_event_registrants
+    log_summary = 'Zoom registrant removal requested'
+    flash_message = _('Removal of all event registrants started. Progress will appear in the event log.')
 
 
 class RHWebhook(RH):

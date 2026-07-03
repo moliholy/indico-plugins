@@ -8,6 +8,7 @@
 import time
 
 from celery.schedules import crontab
+from flask_pluginengine import current_plugin
 from requests.exceptions import HTTPError
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -20,6 +21,29 @@ from indico_vc_zoom.api.client import get_zoom_token
 def update_state_log(log_entry, failed):
     log_entry.data['State'] = 'failed' if failed else 'succeeded'
     flag_modified(log_entry, 'data')
+
+
+def _run_registrant_task(action, vc_room, log_entry):
+    failed = False
+    try:
+        action(vc_room)
+    except Exception:
+        failed = True
+        raise
+    finally:
+        if log_entry:
+            update_state_log(log_entry, failed)
+        db.session.commit()
+
+
+@celery.task(plugin='vc_zoom', autoretry_for=(HTTPError,))
+def sync_event_registrants(vc_room, log_entry=None):
+    _run_registrant_task(current_plugin.sync_existing_registrants, vc_room, log_entry)
+
+
+@celery.task(plugin='vc_zoom', autoretry_for=(HTTPError,))
+def deregister_event_registrants(vc_room, log_entry=None):
+    _run_registrant_task(current_plugin.deregister_all_registrants, vc_room, log_entry)
 
 
 @celery.task(plugin='vc_zoom', autoretry_for=(HTTPError,))

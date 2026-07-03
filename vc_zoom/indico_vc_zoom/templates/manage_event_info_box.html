@@ -50,4 +50,16 @@
         <dt>{% trans %}Modified on{% endtrans %}</dt>
         <dd>{{ vc_room.modified_dt | format_datetime(timezone=event.tzinfo) }}</dd>
     {% endif %}
+    {% if plugin.settings.get('allow_auto_register') %}
+        {% set counts = plugin.get_registration_sync_counts(vc_room) %}
+        <dt>{% trans %}Registered in Zoom{% endtrans %}</dt>
+        <dd>
+            {% if counts.registered is not none %}
+                <strong>{{ counts.registered }} / {{ counts.total }}</strong> {% trans %}event registrants{% endtrans %}
+            {% else %}
+                {{ counts.total }} {% trans %}event registrants{% endtrans %}
+                <em>({% trans %}Zoom status unavailable{% endtrans %})</em>
+            {% endif %}
+        </dd>
+    {% endif %}
 </dl>
