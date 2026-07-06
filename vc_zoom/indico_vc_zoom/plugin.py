@@ -47,9 +47,10 @@ from indico_vc_zoom.cli import cli
 from indico_vc_zoom.forms import VCRoomAttachForm, VCRoomForm
 from indico_vc_zoom.notifications import notify_host_start_url
 from indico_vc_zoom.task import refresh_meetings
-from indico_vc_zoom.util import (UserLookupMode, ZoomMeetingType, fetch_zoom_meeting, find_enterprise_email,
-                                 gen_random_passcode, get_alt_host_emails, get_schedule_args, get_url_data_args,
-                                 preload_zoom_account_directory, process_alternative_hosts, update_zoom_meeting)
+from indico_vc_zoom.util import (SYNC_PROGRESS_TTL, UserLookupMode, ZoomMeetingType, fetch_zoom_meeting,
+                                 find_enterprise_email, gen_random_passcode, get_alt_host_emails, get_schedule_args,
+                                 get_url_data_args, preload_zoom_account_directory, process_alternative_hosts,
+                                 sync_progress_cache, update_zoom_meeting)
 
 
 AUTO_REGISTRATION_MEETING_SCOPES = ('meeting:read:list_registrants:admin', 'meeting:write:registrant:admin',
@@ -914,13 +915,16 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         entries = self._collect_registrants_to_add(client, vc_room)
         total = len(entries)
         self._log_sync_event(event, 'Zoom registrant sync started', {'Meeting': vc_room.name, 'To add': total})
+        self._set_sync_progress(vc_room, 'sync', 'running', 0, total)
         added = 0
         for i in range(0, total, BATCH_REGISTRANTS_MAX):
             chunk = entries[i:i + BATCH_REGISTRANTS_MAX]
             self._add_registrants(client, zoom_id, chunk, is_webinar)
             added += len(chunk)
+            self._set_sync_progress(vc_room, 'sync', 'running', added, total)
             self._log_sync_event(event, 'Zoom registrant sync progress',
                                  {'Meeting': vc_room.name, 'Batch': len(chunk), 'Progress': f'{added}/{total}'})
+        self._set_sync_progress(vc_room, 'sync', 'done', added, total)
         self._log_sync_event(event, 'Zoom registrant sync finished',
                              {'Meeting': vc_room.name, 'Added': added,
                               'Registered': self._format_counts(self.get_registration_sync_counts(vc_room))})
@@ -938,13 +942,16 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         items = list(registrant_map.items())
         total = len(items)
         self._log_sync_event(event, 'Zoom registrant removal started', {'Meeting': vc_room.name, 'To remove': total})
+        self._set_sync_progress(vc_room, 'deregister', 'running', 0, total)
         removed = 0
         for i in range(0, total, BATCH_REGISTRANTS_MAX):
             chunk = items[i:i + BATCH_REGISTRANTS_MAX]
             self._cancel_zoom_registrants(client, zoom_id, chunk, is_webinar)
             removed += len(chunk)
+            self._set_sync_progress(vc_room, 'deregister', 'running', removed, total)
             self._log_sync_event(event, 'Zoom registrant removal progress',
                                  {'Meeting': vc_room.name, 'Batch': len(chunk), 'Progress': f'{removed}/{total}'})
+        self._set_sync_progress(vc_room, 'deregister', 'done', removed, total)
         self._log_sync_event(event, 'Zoom registrant removal finished',
                              {'Meeting': vc_room.name, 'Removed': removed,
                               'Registered': self._format_counts(self.get_registration_sync_counts(vc_room))})
@@ -996,6 +1003,15 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
             return
         user = session.user if has_request_context() else None
         event.log(EventLogRealm.management, LogKind.change, 'Videoconference', summary, user, data=data)
+
+    def _set_sync_progress(self, vc_room, action, state, done, total):
+        sync_progress_cache.set(str(vc_room.id),
+                                {'action': action, 'state': state, 'done': done, 'total': total},
+                                SYNC_PROGRESS_TTL)
+
+    def get_sync_progress(self, vc_room):
+        """Latest state of an in-flight registrant sync/removal, for the management UI to poll."""
+        return sync_progress_cache.get(str(vc_room.id)) or {'state': 'idle'}
 
     def _list_zoom_registrant_emails(self, vc_room):
         client = ZoomIndicoClient()

@@ -8,7 +8,7 @@
 import hashlib
 import hmac
 
-from flask import after_this_request, flash, jsonify, request, session
+from flask import after_this_request, jsonify, request, session
 from flask_pluginengine import current_plugin
 from marshmallow import EXCLUDE
 from sqlalchemy.orm.attributes import flag_modified
@@ -54,13 +54,15 @@ class RHZoomManageRegistrantsBase(RHVCSystemEventBase):
     """Queue an asynchronous registrant operation for a Zoom meeting."""
 
     task = None
+    action = None
     log_summary = None
-    flash_message = None
 
     def _process(self):
         log_entry = self.event.log(EventLogRealm.management, LogKind.change, 'Videoconference',
                                    self.log_summary, session.user,
                                    data={'Meeting': self.vc_room.name, 'State': 'pending'})
+        # Reset progress so the UI tracks this run from the start rather than a previous result.
+        current_plugin._set_sync_progress(self.vc_room, self.action, 'queued', 0, 0)
         task = self.task
         vc_room = self.vc_room
 
@@ -70,20 +72,26 @@ class RHZoomManageRegistrantsBase(RHVCSystemEventBase):
                 task.delay(vc_room, log_entry)
             return response
 
-        flash(self.flash_message, 'info')
         return '', 204
 
 
 class RHZoomSyncRegistrants(RHZoomManageRegistrantsBase):
     task = sync_event_registrants
+    action = 'sync'
     log_summary = 'Zoom registrant sync requested'
-    flash_message = _('Registrant synchronization started. Progress will appear in the event log.')
 
 
 class RHZoomDeregisterRegistrants(RHZoomManageRegistrantsBase):
     task = deregister_event_registrants
+    action = 'deregister'
     log_summary = 'Zoom registrant removal requested'
-    flash_message = _('Removal of all event registrants started. Progress will appear in the event log.')
+
+
+class RHZoomSyncStatus(RHVCSystemEventBase):
+    """Return the progress of an in-flight registrant sync/removal for the management UI to poll."""
+
+    def _process(self):
+        return jsonify(current_plugin.get_sync_progress(self.vc_room))
 
 
 class RHWebhook(RH):

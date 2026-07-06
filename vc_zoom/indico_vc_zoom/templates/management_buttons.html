@@ -9,16 +9,17 @@
         {% set counts = plugin.get_registration_sync_counts(vc_room) %}
         {% set has_registered = counts.registered is not none and counts.registered > 0 %}
         {% if vc_room.data.auto_register or has_registered %}
-            <span class="zoom-registrant-actions" style="margin-left: auto;">
+            <span class="zoom-registrant-actions" style="margin-left: auto;"
+                  data-status-url="{{ url_for_plugin('vc_zoom.sync_status', event_vc_room) }}">
                 {% if vc_room.data.auto_register %}
-                    <a class="i-button icon-user-check"
+                    <a class="i-button icon-user-check js-zoom-registrant-action"
                        title="{% trans %}Add all event registrants to this Zoom meeting{% endtrans %}"
                        data-href="{{ url_for_plugin('vc_zoom.sync_registrants', event_vc_room) }}"
                        data-method="POST"
                        data-reload-after></a>
                 {% endif %}
                 {% if has_registered %}
-                    <a class="i-button danger icon-user-block"
+                    <a class="i-button danger icon-user-block js-zoom-registrant-action"
                        title="{% trans %}Remove all event registrants from this Zoom meeting{% endtrans %}"
                        data-href="{{ url_for_plugin('vc_zoom.deregister_registrants', event_vc_room) }}"
                        data-method="POST"

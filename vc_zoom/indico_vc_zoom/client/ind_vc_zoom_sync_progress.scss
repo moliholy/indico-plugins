@@ -1,0 +1,34 @@
+// This file is part of the Indico plugins.
+// Copyright (C) 2020 - 2026 CERN and ENEA
+//
+// The Indico plugins are free software; you can redistribute
+// them and/or modify them under the terms of the MIT License;
+// see the LICENSE file for more details.
+
+.vc-zoom-sync-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  margin-left: auto;
+  white-space: nowrap;
+  color: #5b5b5b;
+
+  .vc-zoom-sync-spinner {
+    animation: vc-zoom-sync-spin 0.9s linear infinite;
+  }
+
+  &.vc-zoom-sync-idle .vc-zoom-sync-spinner {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+@keyframes vc-zoom-sync-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}

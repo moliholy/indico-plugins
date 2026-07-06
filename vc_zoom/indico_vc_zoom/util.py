@@ -107,6 +107,10 @@ _zoom_directory_cache = make_scoped_cache('vc-zoom')
 # How long the account email directory is reused before it is fetched from Zoom again.
 ZOOM_DIRECTORY_CACHE_TTL = timedelta(minutes=10)
 
+# Progress of an in-flight registrant sync/removal, polled by the management UI.
+sync_progress_cache = make_scoped_cache('vc-zoom-sync-progress')
+SYNC_PROGRESS_TTL = timedelta(minutes=30)
+
 
 def _iter_zoom_account_emails(client):
     params = {'page_size': LIST_USERS_MAX_PAGE_SIZE, 'status': 'active'}

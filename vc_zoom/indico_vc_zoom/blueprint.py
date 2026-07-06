@@ -8,7 +8,7 @@
 from indico.core.plugins import IndicoPluginBlueprint
 
 from indico_vc_zoom.controllers import (RHRoomAlternativeHost, RHWebhook, RHZoomDeregisterRegistrants,
-                                        RHZoomSyncRegistrants)
+                                        RHZoomSyncRegistrants, RHZoomSyncStatus)
 
 
 blueprint = IndicoPluginBlueprint('vc_zoom', 'indico_vc_zoom')
@@ -33,5 +33,11 @@ blueprint.add_url_rule(
     'deregister_registrants',
     RHZoomDeregisterRegistrants,
     methods=('POST',)
+)
+blueprint.add_url_rule(
+    '/event/<int:event_id>/manage/videoconference/<any(zoom):service>/<int:event_vc_room_id>/sync-status',
+    'sync_status',
+    RHZoomSyncStatus,
+    methods=('GET',)
 )
 blueprint.add_url_rule('/api/plugin/zoom/webhook', 'webhook', RHWebhook, methods=('POST',))

@@ -661,6 +661,69 @@ def test_deregister_endpoint_enqueues_task(
     assert delay.call_count == 1
 
 
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_writes_progress(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration, mocker,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_meeting_registrants'].return_value = {'registrants': []}
+    spy = mocker.spy(zoom_plugin, '_set_sync_progress')
+
+    zoom_plugin.sync_existing_registrants(vc_room)
+
+    progress = [call.args[1:] for call in spy.call_args_list]
+    assert ('sync', 'running', 0, 1) in progress
+    assert ('sync', 'done', 1, 1) in progress
+
+
+def test_sync_status_endpoint_returns_progress(
+    db, zoom_plugin, reg_form, create_zoom_meeting, test_client, zoom_user, mocker,
+):
+    zoom_plugin.settings.set('allow_auto_register', True)
+    event = reg_form.event
+    event.update_principal(zoom_user, full_access=True)
+    db.session.flush()
+
+    with test_client.session_transaction() as sess:
+        sess.set_session_user(zoom_user)
+    vc_room = create_zoom_meeting(event, 'event')
+    event_vc_room = vc_room.events[0]
+
+    mocker.patch.object(type(zoom_plugin), 'get_sync_progress',
+                        return_value={'action': 'sync', 'state': 'running', 'done': 2, 'total': 5})
+    resp = test_client.get(f'/event/{event.id}/manage/videoconference/zoom/{event_vc_room.id}/sync-status')
+
+    assert resp.status_code == 200
+    assert resp.json == {'action': 'sync', 'state': 'running', 'done': 2, 'total': 5}
+
+
+def test_sync_endpoint_resets_progress(
+    db, zoom_plugin, zoom_api_registrants, reg_form, create_zoom_meeting, test_client, zoom_user, mocker,
+):
+    zoom_plugin.settings.set('allow_auto_register', True)
+    event = reg_form.event
+    event.update_principal(zoom_user, full_access=True)
+    db.session.flush()
+
+    with test_client.session_transaction() as sess:
+        sess.set_session_user(zoom_user)
+    vc_room = create_zoom_meeting(event, 'event')
+    vc_room.data['auto_register'] = True
+    event_vc_room = vc_room.events[0]
+
+    mocker.patch.object(sync_event_registrants, 'delay')
+    spy = mocker.spy(type(zoom_plugin), '_set_sync_progress')
+    resp = test_client.post(f'/event/{event.id}/manage/videoconference/zoom/{event_vc_room.id}/sync-registrants')
+
+    assert resp.status_code == 204
+    assert ('sync', 'queued', 0, 0) in [call.args[2:] for call in spy.call_args_list]
+
+
 @pytest.mark.parametrize(
     ('allow_auto_register', 'expected_auto_register', 'expected_password_visibility'),
     (

@@ -6,3 +6,4 @@
 // see the LICENSE file for more details.
 
 import './ind_vc_zoom_join_button';
+import './ind_vc_zoom_sync_progress';
