@@ -534,6 +534,83 @@ def test_sync_existing_registrants_skips_existing_zoom_registrants(
     assert reg_data['email'] == 'new@example.com'
 
 
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_below_threshold_skips_directory(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_users'].reset_mock()
+    util._zoom_directory_cache.delete('account-emails')
+    g.pop('zoom_account_emails', None)
+
+    zoom_plugin.sync_existing_registrants(vc_room)
+
+    zoom_api_registrants['list_users'].assert_not_called()
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_above_threshold_preloads_directory(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration, mocker,
+):
+    mocker.patch('indico_vc_zoom.plugin.DIRECTORY_PRELOAD_THRESHOLD', 1)
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_users'].reset_mock()
+    util._zoom_directory_cache.delete('account-emails')
+    g.pop('zoom_account_emails', None)
+
+    zoom_plugin.sync_existing_registrants(vc_room)
+
+    assert zoom_api_registrants['list_users'].called
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_deregister_below_threshold_skips_directory(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_users'].reset_mock()
+    util._zoom_directory_cache.delete('account-emails')
+    g.pop('zoom_account_emails', None)
+
+    zoom_plugin.deregister_all_registrants(vc_room)
+
+    zoom_api_registrants['list_users'].assert_not_called()
+
+
+@pytest.mark.usefixtures('db', 'smtp')
+def test_sync_counts_below_threshold_skips_directory(
+    zoom_plugin, zoom_api_registrants, reg_form, zoom_user,
+    create_vc_room_with_assoc, make_complete_registration,
+):
+    event = reg_form.event
+    make_complete_registration(reg_form, 'alice@example.com', 'Alice', 'Smith')
+
+    zoom_plugin.settings.set('allow_auto_register', True)
+    vc_room, _assoc = create_vc_room_with_assoc(event, zoom_user, auto_register=True)
+    zoom_api_registrants['list_users'].reset_mock()
+    util._zoom_directory_cache.delete('account-emails')
+    g.pop('zoom_account_emails', None)
+
+    zoom_plugin.get_registration_sync_counts(vc_room)
+
+    zoom_api_registrants['list_users'].assert_not_called()
+
+
 @pytest.mark.usefixtures('request_context', 'db', 'smtp')
 def test_enable_auto_register_does_not_backfill(
     zoom_plugin, zoom_api_registrants, reg_form, zoom_user,

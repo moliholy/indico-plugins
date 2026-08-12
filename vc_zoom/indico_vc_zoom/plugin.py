@@ -908,7 +908,8 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         """Add every completed event registrant to the Zoom meeting, logging progress per batch."""
         is_webinar = vc_room.data.get('meeting_type') == 'webinar'
         self._ensure_registration_enabled(vc_room, is_webinar=is_webinar)
-        preload_zoom_account_directory()
+        if len(self._collect_complete_registrations(vc_room)) >= DIRECTORY_PRELOAD_THRESHOLD:
+            self._preload_directory()
         client = ZoomIndicoClient()
         zoom_id = vc_room.data['zoom_id']
         event = self._room_event(vc_room)
@@ -933,7 +934,6 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
     def deregister_all_registrants(self, vc_room):
         """Cancel every event registrant's Zoom registration, leaving manually-added ones untouched."""
         is_webinar = vc_room.data.get('meeting_type') == 'webinar'
-        preload_zoom_account_directory()
         client = ZoomIndicoClient()
         zoom_id = vc_room.data['zoom_id']
         event = self._room_event(vc_room)
@@ -987,12 +987,13 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         return entries
 
     def _collect_registration_email_ids(self, vc_room):
-        email_ids = {}
-        for event_assoc in vc_room.events:
-            for regform in event_assoc.event.registration_forms:
-                for registration in regform.active_registrations:
-                    email_ids[self._get_registrant_email(registration).lower()] = registration.id
-        return email_ids
+        registrations = [registration
+                         for event_assoc in vc_room.events
+                         for regform in event_assoc.event.registration_forms
+                         for registration in regform.active_registrations]
+        if len(registrations) >= DIRECTORY_PRELOAD_THRESHOLD:
+            self._preload_directory()
+        return {self._get_registrant_email(r).lower(): r.id for r in registrations}
 
     def _room_event(self, vc_room):
         assoc = next(iter(vc_room.events), None)
@@ -1038,8 +1039,10 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
     @memoize_request
     def get_registration_sync_counts(self, vc_room):
         """Live count of event registrants currently registered in the Zoom meeting."""
-        self._preload_directory()
-        emails = {self._get_registrant_email(reg).lower() for reg in self._collect_complete_registrations(vc_room)}
+        registrations = self._collect_complete_registrations(vc_room)
+        if len(registrations) >= DIRECTORY_PRELOAD_THRESHOLD:
+            self._preload_directory()
+        emails = {self._get_registrant_email(reg).lower() for reg in registrations}
         total = len(emails)
         zoom_emails = self._list_zoom_registrant_emails(vc_room)
         registered = None if zoom_emails is None else len(emails & zoom_emails)
