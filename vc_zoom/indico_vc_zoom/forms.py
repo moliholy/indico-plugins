@@ -260,10 +260,12 @@ class VCRoomForm(VCRoomFormBase):
             self._check_zoom_user(field.data)
 
     def validate_alternative_host_users(self, field):
-        for user in (field.data or ()):
-            self._check_zoom_user(user)
-            if user.persistent_identifier == self.host.data:
-                raise ValidationError(_('The meeting host cannot be an alternative host'))
+        users = field.data or ()
+        # unlike the host field, this one holds several users, so the error has to name them
+        if invalid := sorted(user.full_name for user in users if find_enterprise_email(user) is None):
+            raise ValidationError(_('No Zoom account: {}').format(', '.join(invalid)))
+        if any(user.persistent_identifier == self.host.data for user in users):
+            raise ValidationError(_('The meeting host cannot be an alternative host'))
 
     def validate_interpreters(self, field):
         items = field.serialized_data or field.data or []

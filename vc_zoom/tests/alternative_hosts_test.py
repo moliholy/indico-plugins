@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from flask import session
 
+from indico.modules.vc.exceptions import VCRoomError
 from indico.web.forms.base import FormDefaults
 
 
@@ -21,7 +22,15 @@ TZ = ZoneInfo('Europe/Zurich')
 
 @pytest.fixture
 def alt_host(create_user):
-    return create_user(2, email='ada.lovelace@megacorp.xyz')
+    return create_user(2, first_name='Ada', last_name='Lovelace', email='ada.lovelace@megacorp.xyz')
+
+
+@pytest.fixture
+def alt_host_gone_from_zoom(zoom_api, alt_host):
+    zoom_api['get_user'].side_effect = (
+        lambda email, *args, **kwargs: None if email == alt_host.email else {'id': '7890abcd', 'email': email}
+    )
+    return alt_host
 
 
 @pytest.fixture
@@ -194,12 +203,25 @@ def test_form_stores_alternative_hosts_as_identifiers(zoom_plugin, app, event, z
 
 def test_form_rejects_alternative_host_without_zoom_account(zoom_plugin, app, no_csrf_check, event, zoom_api,
                                                             zoom_user, create_user):
-    outsider = create_user(4, email='grace.hopper@example.com')
+    outsider = create_user(4, first_name='Grace', last_name='Hopper', email='grace.hopper@example.com')
     formdata = {'vc-alternative_host_users': json.dumps([outsider.identifier])}
 
     with _make_form(zoom_plugin, app, event, formdata=formdata, user=zoom_user) as form:
         assert not form.validate()
-        assert 'no Zoom account' in str(form.alternative_host_users.errors[0])
+        assert 'No Zoom account: Grace Hopper' in str(form.alternative_host_users.errors[0])
+
+
+def test_form_names_every_alternative_host_without_zoom_account(zoom_plugin, app, no_csrf_check, event, zoom_api,
+                                                                zoom_user, create_user):
+    outsiders = [create_user(4, first_name='Grace', last_name='Hopper', email='grace.hopper@example.com'),
+                 create_user(5, first_name='Alan', last_name='Turing', email='alan.turing@example.com')]
+    formdata = {'vc-alternative_host_users': json.dumps([u.identifier for u in outsiders])}
+
+    with _make_form(zoom_plugin, app, event, formdata=formdata, user=zoom_user) as form:
+        assert not form.validate()
+        error = str(form.alternative_host_users.errors[0])
+        assert 'Grace Hopper' in error
+        assert 'Alan Turing' in error
 
 
 def test_form_rejects_host_as_alternative_host(zoom_plugin, app, no_csrf_check, event, zoom_api, zoom_user):
@@ -226,3 +248,32 @@ def test_form_prefills_alternative_hosts_when_editing(zoom_plugin, app, create_z
 
     with _make_form(zoom_plugin, app, event, vc_room=vc_room) as form:
         assert form.alternative_host_users.data == {alt_host}
+
+
+def test_form_loads_alternative_host_removed_from_zoom(zoom_plugin, app, create_zoom_meeting, event, zoom_api,
+                                                       alt_host_gone_from_zoom):
+    vc_room = create_zoom_meeting(event, 'event')
+    vc_room.data['alternative_hosts'] = [alt_host_gone_from_zoom.persistent_identifier]
+
+    with _make_form(zoom_plugin, app, event, vc_room=vc_room) as form:
+        assert form.alternative_host_users.data == {alt_host_gone_from_zoom}
+
+
+def test_form_rejects_alternative_host_removed_from_zoom(zoom_plugin, app, no_csrf_check, event, zoom_api, zoom_user,
+                                                         alt_host_gone_from_zoom):
+    formdata = {'vc-alternative_host_users': json.dumps([alt_host_gone_from_zoom.identifier])}
+
+    with _make_form(zoom_plugin, app, event, formdata=formdata, user=zoom_user) as form:
+        assert not form.validate()
+        assert 'No Zoom account: Ada Lovelace' in str(form.alternative_host_users.errors[0])
+
+
+def test_update_room_names_alternative_host_removed_from_zoom(mocker, create_zoom_meeting, zoom_plugin, zoom_api, event,
+                                                              alt_host_gone_from_zoom):
+    vc_room = create_zoom_meeting(event, 'event')
+    vc_room.data['alternative_hosts'] = [alt_host_gone_from_zoom.persistent_identifier]
+    mocker.patch('indico_vc_zoom.plugin.ZoomIndicoClient.get_meeting',
+                 side_effect=lambda id_, *a, **kw: _zoom_meeting(id_, ''))
+
+    with pytest.raises(VCRoomError, match='Ada Lovelace'):
+        zoom_plugin.update_room(vc_room, event)

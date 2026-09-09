@@ -223,8 +223,10 @@ def process_alternative_hosts(emails):
 
 def get_alt_host_emails(identifiers):
     """Convert a list of identities into a list of enterprise e-mails."""
-    emails = [find_enterprise_email(principal_from_identifier(ident, require_user_token=False))
-              for ident in identifiers]
-    if None in emails:
-        raise VCRoomError(_('Could not find Zoom user for alternative host'))
+    users = [principal_from_identifier(ident, require_user_token=False) for ident in identifiers]
+    emails = [find_enterprise_email(user) for user in users]
+    # this may run outside the form (e.g. when the event is rescheduled), so the error
+    # has to name whoever lost their Zoom account for the manager to know what to remove
+    if invalid := sorted(user.full_name for user, email in zip(users, emails, strict=True) if email is None):
+        raise VCRoomError(_('Alternative hosts without a Zoom account: {}').format(', '.join(invalid)))
     return emails
