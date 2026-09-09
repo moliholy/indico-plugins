@@ -11,6 +11,10 @@
 
 ## Changelog
 
+### 3.3.7
+
+- Allow restricting automatic registration to specific registration forms
+
 ### 3.3.6
 
 - Compare webhook HMAC token in a more secure manner
