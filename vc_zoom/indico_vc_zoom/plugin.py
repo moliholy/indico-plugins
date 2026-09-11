@@ -92,7 +92,7 @@ def _get_missing_auto_registration_scopes(granted_scopes, *, allow_webinars):
 
 class PluginSettingsForm(VCPluginSettingsFormBase):
     _fieldsets = [
-        (_('API Credentials'), ['account_id', 'client_id', 'client_secret']),
+        (_('API Credentials'), ['account_id', 'client_id', 'client_secret', 'webhook_token']),
         (_('Security'), ['passcode_length']),
         (_('Zoom Account'), ['user_lookup_mode', 'email_domains', 'authenticators', 'enterprise_domain',
                              'allow_webinars', 'allow_language_interpretation', 'allow_auto_register', 'phone_link']),
@@ -105,6 +105,11 @@ class PluginSettingsForm(VCPluginSettingsFormBase):
     account_id = StringField(_('Account ID'))
     client_id = StringField(_('Client ID'))
     client_secret = IndicoPasswordField(_('Client Secret'), toggle=True)
+    webhook_token = IndicoPasswordField(_('Webhook Secret Token'), toggle=True,
+                                        description=_('Specify the "Secret Token" of your Zoom Webhook if you want '
+                                                      'live updates in case of modified/deleted Zoom meetings. '
+                                                      'Alternatively, set PLUGIN_VC_ZOOM_WEBHOOK_TOKEN in '
+                                                      'indico.conf; this field is then hidden.'))
 
     passcode_length = IntegerField(_('Passcode length'), [DataRequired(), NumberRange(min=8, max=10)],
                                    description=_('Length of auto-generated Zoom meeting passcodes'))
@@ -182,6 +187,11 @@ class PluginSettingsForm(VCPluginSettingsFormBase):
     phone_link = URLField(_('Join via phone'), [Optional(), URL()],
                           description=_('Link to instructions on joining a meeting via phone'))
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if ZoomPlugin.plugin_config.WEBHOOK_TOKEN:
+            del self.webhook_token
+
     def validate_authenticators(self, field):
         invalid = set(field.data) - set(multipass.identity_providers)
         if invalid:
@@ -237,6 +247,7 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         'account_id': '',
         'client_id': '',
         'client_secret': '',
+        'webhook_token': '',
         'passcode_length': 8,
         'user_lookup_mode': UserLookupMode.email_domains,
         'email_domains': [],
