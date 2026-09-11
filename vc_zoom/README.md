@@ -14,6 +14,8 @@
 ### 3.3.7
 
 - Allow restricting automatic registration to specific registration forms
+- Move the webhook secret token from the plugin settings to `indico.conf`
+  (`PLUGIN_VC_ZOOM_WEBHOOK_TOKEN`); existing deployments need to copy the value there
 
 ### 3.3.6
 
@@ -165,9 +167,14 @@
 
 **URL:** `https://yourserver/api/plugin/zoom/webhook`
 
-Copy the "Secret Token", as you will need it in the plugin configuration below. Note that in order
-to actually create the webhook you need to validate the URL, which requires the token to saved in
-the Indico plugin configuration.
+Copy the "Secret Token" and set it in `indico.conf`:
+
+```python
+PLUGIN_VC_ZOOM_WEBHOOK_TOKEN = 'your-secret-token'
+```
+
+Note that in order to actually create the webhook you need to validate the URL, which requires the
+token to be configured (and Indico restarted) beforehand.
 
 Select the following "Event types":
  * `Meeting has been updated`
@@ -184,7 +191,6 @@ These are the most relevant configuration options:
 
  * **Notification email addresses** - Additional e-mails which will receive notifications
  * **E-mail domains** - List of e-mail domains which can be used for the Zoom API (e.g. `cern.ch`)
- * **Webhook Secret Token** (optional) - the token which Zoom requests will authenticate with (get it from Zoom Marketplace)
  * **Passcode length** - Length of auto-generated Zoom meeting passcodes (default 8, allowed range 8-10)
  * **Allow automatic registration** - Enable this to allow event managers to opt-in to automatic Zoom
    registration on individual meetings/webinars. Requires the registration-related scopes listed below.

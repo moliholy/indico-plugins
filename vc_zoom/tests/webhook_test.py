@@ -35,8 +35,8 @@ def _add_registration_form(db, event, title):
 
 
 @pytest.fixture
-def webhook_client(test_client, zoom_plugin):
-    zoom_plugin.settings.set('webhook_token', TOKEN)
+def webhook_client(test_client, patch_indico_config):
+    patch_indico_config('PLUGIN_VC_ZOOM_WEBHOOK_TOKEN', TOKEN)
 
     def _post(payload, *, timestamp=None):
         if timestamp is None:
@@ -59,8 +59,8 @@ def webhook_client(test_client, zoom_plugin):
 # ── Security tests ────────────────────────────────────────────────────────────
 
 @pytest.mark.usefixtures('db')
-def test_webhook_bad_signature_returns_403(test_client, zoom_plugin):
-    zoom_plugin.settings.set('webhook_token', TOKEN)
+def test_webhook_bad_signature_returns_403(test_client, patch_indico_config):
+    patch_indico_config('PLUGIN_VC_ZOOM_WEBHOOK_TOKEN', TOKEN)
     ts = str(int(time.time()))
     resp = test_client.post(
         '/api/plugin/zoom/webhook',
@@ -68,6 +68,17 @@ def test_webhook_bad_signature_returns_403(test_client, zoom_plugin):
         headers={'x-zm-request-timestamp': ts, 'x-zm-signature': 'v0=badsig'},
     )
     assert resp.status_code == 403
+
+
+@pytest.mark.usefixtures('db')
+def test_webhook_without_token_returns_503(test_client):
+    ts = str(int(time.time()))
+    resp = test_client.post(
+        '/api/plugin/zoom/webhook',
+        json={'event': 'meeting.updated', 'payload': {'object': {'id': 100000}}},
+        headers={'x-zm-request-timestamp': ts, 'x-zm-signature': 'v0=badsig'},
+    )
+    assert resp.status_code == 503
 
 
 # ── participant_joined check-in tests ─────────────────────────────────────────

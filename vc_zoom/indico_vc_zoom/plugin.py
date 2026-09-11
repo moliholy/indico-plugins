@@ -92,7 +92,7 @@ def _get_missing_auto_registration_scopes(granted_scopes, *, allow_webinars):
 
 class PluginSettingsForm(VCPluginSettingsFormBase):
     _fieldsets = [
-        (_('API Credentials'), ['account_id', 'client_id', 'client_secret', 'webhook_token']),
+        (_('API Credentials'), ['account_id', 'client_id', 'client_secret']),
         (_('Security'), ['passcode_length']),
         (_('Zoom Account'), ['user_lookup_mode', 'email_domains', 'authenticators', 'enterprise_domain',
                              'allow_webinars', 'allow_language_interpretation', 'allow_auto_register', 'phone_link']),
@@ -105,9 +105,6 @@ class PluginSettingsForm(VCPluginSettingsFormBase):
     account_id = StringField(_('Account ID'))
     client_id = StringField(_('Client ID'))
     client_secret = IndicoPasswordField(_('Client Secret'), toggle=True)
-    webhook_token = IndicoPasswordField(_('Webhook Secret Token'), toggle=True,
-                                        description=_('Specify the "Secret Token" of your Zoom Webhook if you want '
-                                                      'live updates in case of modified/deleted Zoom meetings.'))
 
     passcode_length = IntegerField(_('Passcode length'), [DataRequired(), NumberRange(min=8, max=10)],
                                    description=_('Length of auto-generated Zoom meeting passcodes'))
@@ -235,11 +232,11 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
     vc_room_form = VCRoomForm
     vc_room_attach_form = VCRoomAttachForm
     friendly_name = 'Zoom'
+    plugin_config_defaults = {'WEBHOOK_TOKEN': None}
     default_settings = VCPluginMixin.default_settings | {
         'account_id': '',
         'client_id': '',
         'client_secret': '',
-        'webhook_token': '',
         'passcode_length': 8,
         'user_lookup_mode': UserLookupMode.email_domains,
         'email_domains': [],
