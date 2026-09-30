@@ -19,6 +19,7 @@
   (`PLUGIN_VC_ZOOM_ACCOUNT_ID`, `PLUGIN_VC_ZOOM_CLIENT_ID`, `PLUGIN_VC_ZOOM_CLIENT_SECRET`,
   `PLUGIN_VC_ZOOM_WEBHOOK_TOKEN`); when set, they take precedence over the plugin settings, which can
   then no longer be changed from the settings page
+- Allow enabling automatic cloud recording on individual meetings and webinars, if allowed in the plugin settings
 
 ### 3.3.6
 

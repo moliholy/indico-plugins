@@ -60,6 +60,7 @@ class VCRoomForm(VCRoomFormBase):
         'mute_audio',
         'mute_host_video',
         'mute_participant_video',
+        'cloud_recording',
         *VCRoomFormBase.advanced_fields,
         'language_interpretation',
         'interpreters',
@@ -117,6 +118,10 @@ class VCRoomForm(VCRoomFormBase):
     waiting_room = BooleanField(_('Waiting room'),
                                 widget=SwitchWidget(),
                                 description=_('Participants may be kept in a waiting room by the host'))
+
+    cloud_recording = BooleanField(_('Automatic cloud recording'),
+                                   widget=SwitchWidget(),
+                                   description=_('The meeting will be recorded automatically in the Zoom cloud'))
 
     auto_register = BooleanField(_('Automatic registration'),
                                  widget=SwitchWidget(),
@@ -210,6 +215,9 @@ class VCRoomForm(VCRoomFormBase):
         if not current_plugin.settings.get('allow_language_interpretation'):
             del self.language_interpretation
             del self.interpreters
+
+        if not current_plugin.settings.get('allow_cloud_recording'):
+            del self.cloud_recording
 
     def _setup_registration_forms(self):
         regforms = sorted(self.event.registration_forms, key=lambda rf: natural_sort_key(rf.title))

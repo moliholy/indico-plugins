@@ -99,7 +99,8 @@ class PluginSettingsForm(VCPluginSettingsFormBase):
         (_('API Credentials'), ['account_id', 'client_id', 'client_secret', 'webhook_token']),
         (_('Security'), ['passcode_length']),
         (_('Zoom Account'), ['user_lookup_mode', 'email_domains', 'authenticators', 'enterprise_domain',
-                             'allow_webinars', 'allow_language_interpretation', 'allow_auto_register', 'phone_link']),
+                             'allow_webinars', 'allow_language_interpretation', 'allow_auto_register',
+                             'allow_cloud_recording', 'phone_link']),
         (_('Room Settings'), ['mute_audio', 'mute_host_video', 'mute_participant_video', 'join_before_host',
                               'waiting_room']),
         (_('Notifications'), ['creation_email_footer', 'send_host_url', 'notification_emails']),
@@ -155,6 +156,12 @@ class PluginSettingsForm(VCPluginSettingsFormBase):
                                                     '<a href="https://github.com/indico/indico-plugins/tree/master/'
                                                     'vc_zoom#zoom-server-to-server-oauth">plugin README</a> '
                                                     'for details.'))
+
+    allow_cloud_recording = BooleanField(_('Allow cloud recording'),
+                                         widget=SwitchWidget(),
+                                         description=_('Allow event managers to record individual meetings/webinars '
+                                                       'automatically to the Zoom cloud. Requires a Zoom plan with '
+                                                       'cloud recording.'))
 
     mute_audio = BooleanField(_('Mute audio'),
                               widget=SwitchWidget(),
@@ -254,6 +261,7 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         'allow_webinars': False,
         'allow_language_interpretation': False,
         'allow_auto_register': False,
+        'allow_cloud_recording': False,
         'mute_host_video': True,
         'mute_audio': True,
         'mute_participant_video': True,
@@ -442,7 +450,8 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
         auto_register_before = vc_room.data.get('auto_register') if not is_new else None
         regform_ids_before = self._get_synced_regform_ids(vc_room) if not is_new else None
         super().update_data_vc_room(vc_room, data, is_new=is_new)
-        fields = {'description', 'password', 'auto_register', 'auto_checkin', 'registration_forms', 'alternative_hosts'}
+        fields = {'description', 'password', 'auto_register', 'auto_checkin', 'registration_forms', 'alternative_hosts',
+                  'cloud_recording'}
 
         # we may end up not getting a meeting_type from the form
         # (i.e. webinars are disabled)
@@ -554,6 +563,8 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
                 'host_video': not vc_room.data['mute_host_video'],
                 'language_interpretation': self._build_language_interpretation_settings(vc_room)
             }
+            if self.settings.get('allow_cloud_recording'):
+                settings['auto_recording'] = 'cloud' if vc_room.data.get('cloud_recording') else 'none'
 
             kwargs = {}
             if is_webinar:
@@ -688,6 +699,12 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
             if vc_room.data['waiting_room'] != zoom_meeting_settings['waiting_room']:
                 changes.setdefault('settings', {})['waiting_room'] = vc_room.data['waiting_room']
 
+        if self.settings.get('allow_cloud_recording'):
+            cloud_recording = vc_room.data.get('cloud_recording', False)
+            # only compare against cloud recording so a local recording set up in Zoom is kept
+            if cloud_recording != (zoom_meeting_settings.get('auto_recording') == 'cloud'):
+                changes.setdefault('settings', {})['auto_recording'] = 'cloud' if cloud_recording else 'none'
+
         # Manual approval (1) when auto_register is on; see create_room for the rationale.
         desired_approval_type = 1 if vc_room.data.get('auto_register') else 2
         approval_type_changed = zoom_meeting_settings.get('approval_type') != desired_approval_type
@@ -731,6 +748,7 @@ class ZoomPlugin(VCPluginMixin, IndicoPlugin):
                  'target_lang': x['interpreter_languages'].split(',')[1]}
                 for x in zoom_meeting['settings'].get('language_interpretation', {}).get('interpreters', [])
             ],
+            'cloud_recording': zoom_meeting['settings'].get('auto_recording') == 'cloud',
 
             # these options will be empty for webinars
             'mute_audio': zoom_meeting['settings'].get('mute_upon_entry'),
